@@ -409,7 +409,7 @@
 
       button.type = "button";
       button.className =
-        `board-button ${activeBoard === board.id ? "active" : ""}`;
+        `board-button ${String(activeBoard) === String(board.id) ? "active" : ""}`;
 
       button.textContent = board.name;
 
@@ -444,19 +444,19 @@
 
   // SELECT BOARD
 
-  function selectBoard(boardId) {
-    activeBoard = boardId;
+function selectBoard(boardId) {
+  activeBoard = String(boardId);
 
-    const board = boards.find(
-      item => String(item.id) === String(boardId)
-    );
+  const board = boards.find(
+    item => String(item.id) === activeBoard
+  );
 
-    galleryHeading.textContent =
-      board ? board.name : "All Photos";
+  galleryHeading.textContent =
+    board ? board.name : "All Photos";
 
-    renderBoards();
-    loadPhotos();
-  }
+  renderBoards();
+  loadPhotos();
+}
 
   // RENDER PHOTOS
 
@@ -526,16 +526,16 @@
 
       boardLabels.className = "mb-2";
 
-      for (const board of photo.boards || []) {
+       for (const boardName of photo.board_names || []) {
         const label = document.createElement("span");
 
         label.className =
-          "badge text-bg-primary me-1 mb-1";
+        "badge text-bg-primary me-1 mb-1";
 
-        label.textContent = board.name;
+         label.textContent = boardName;
 
         boardLabels.append(label);
-      }
+        }
 
       // DATE
 
