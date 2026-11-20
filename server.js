@@ -85,27 +85,30 @@ async function removeUpload(filePath) {
   }
 }
 
+
+// Return every board, its photo count, and its latest photo thumbnail.
+
 // -------------------- BOARDS --------------------
 
-// Return every board, its photo count, and a filename for its latest photo thumbnail.
+// Return every board, its photo count, and its latest photo thumbnail.
 app.get("/api/boards", async (_req, res, next) => {
   try {
     const result = await pool.query(`
       SELECT
         b.id,
         b.name,
-        b.description,
         b.created_at,
-        COUNT(bp.photo_id)::int AS "photoCount",
+        COUNT(DISTINCT bp.photo_id)::int AS "photoCount",
         cover.filename AS "coverFilename"
       FROM boards b
-      LEFT JOIN board_photos bp ON bp.board_id = b.id
+      LEFT JOIN board_photos bp
+        ON bp.board_id = b.id
       LEFT JOIN LATERAL (
         SELECT p.filename
         FROM board_photos cover_bp
         JOIN photos p ON p.id = cover_bp.photo_id
         WHERE cover_bp.board_id = b.id
-        ORDER BY cover_bp.added_at DESC
+        ORDER BY cover_bp.created_at DESC
         LIMIT 1
       ) cover ON TRUE
       GROUP BY b.id, cover.filename
@@ -128,73 +131,82 @@ app.get("/api/boards", async (_req, res, next) => {
 // Create a board.
 app.post("/api/boards", async (req, res, next) => {
   try {
-    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-    const description = typeof req.body.description === "string"
-      ? req.body.description.trim()
+    const name = typeof req.body.name === "string"
+      ? req.body.name.trim()
       : "";
 
     if (!name) throw httpError("Board name is required.");
-    if (name.length > 100) throw httpError("Board name must be 100 characters or fewer.");
-    if (description.length > 500) {
-      throw httpError("Description must be 500 characters or fewer.");
+    if (name.length > 100) {
+      throw httpError("Board name must be 100 characters or fewer.");
     }
 
     const result = await pool.query(
-      `INSERT INTO boards (name, description)
-       VALUES ($1, $2)
-       RETURNING id, name, description, created_at`,
-      [name, description]
+      `INSERT INTO boards (name)
+       VALUES ($1)
+       RETURNING id, name, created_at`,
+      [name]
     );
 
-    res.status(201).json({ board: { ...result.rows[0], photoCount: 0, coverUrl: null } });
+    res.status(201).json({
+      board: {
+        ...result.rows[0],
+        photoCount: 0,
+        coverUrl: null
+      }
+    });
   } catch (error) {
     next(error);
   }
 });
 
-// Rename a board and/or update its description.
+// Rename a board.
 app.patch("/api/boards/:boardId", async (req, res, next) => {
   try {
     const boardId = positiveId(req.params.boardId, "Board ID");
-    const name = typeof req.body.name === "string" ? req.body.name.trim() : "";
-    const description = typeof req.body.description === "string"
-      ? req.body.description.trim()
+    const name = typeof req.body.name === "string"
+      ? req.body.name.trim()
       : "";
 
     if (!name) throw httpError("Board name is required.");
-    if (name.length > 100) throw httpError("Board name must be 100 characters or fewer.");
-    if (description.length > 500) {
-      throw httpError("Description must be 500 characters or fewer.");
+    if (name.length > 100) {
+      throw httpError("Board name must be 100 characters or fewer.");
     }
 
     const result = await pool.query(
       `UPDATE boards
-       SET name = $1, description = $2
-       WHERE id = $3
-       RETURNING id, name, description, created_at`,
-      [name, description, boardId]
+       SET name = $1
+       WHERE id = $2
+       RETURNING id, name, created_at`,
+      [name, boardId]
     );
 
     if (!result.rowCount) throw httpError("Board not found.", 404);
+
     res.json({ board: result.rows[0] });
   } catch (error) {
     next(error);
   }
 });
 
-// Deleting a board deletes its membership rows, not the photo records or files.
+// Deleting a board removes its membership rows, not the photos.
 app.delete("/api/boards/:boardId", async (req, res, next) => {
   try {
     const boardId = positiveId(req.params.boardId, "Board ID");
-    const result = await pool.query("DELETE FROM boards WHERE id = $1", [boardId]);
+
+    const result = await pool.query(
+      "DELETE FROM boards WHERE id = $1",
+      [boardId]
+    );
+
     if (!result.rowCount) throw httpError("Board not found.", 404);
+
     res.json({ success: true });
   } catch (error) {
     next(error);
   }
 });
 
-// Add an already-uploaded photo to a board.
+// Add an existing photo to a board.
 app.post("/api/boards/:boardId/photos/:photoId", async (req, res, next) => {
   try {
     const boardId = positiveId(req.params.boardId, "Board ID");
@@ -218,8 +230,13 @@ app.post("/api/boards/:boardId/photos/:photoId", async (req, res, next) => {
       [boardId, photoId]
     );
 
-    if (!exists.rows[0].board_exists) throw httpError("Board not found.", 404);
-    if (!exists.rows[0].photo_exists) throw httpError("Photo not found.", 404);
+    if (!exists.rows[0].board_exists) {
+      throw httpError("Board not found.", 404);
+    }
+
+    if (!exists.rows[0].photo_exists) {
+      throw httpError("Photo not found.", 404);
+    }
 
     res.status(result.rowCount ? 201 : 200).json({
       success: true,
@@ -241,40 +258,88 @@ app.delete("/api/boards/:boardId/photos/:photoId", async (req, res, next) => {
       [boardId, photoId]
     );
 
-    if (!result.rowCount) throw httpError("That photo is not in this board.", 404);
+    if (!result.rowCount) {
+      throw httpError("That photo is not in this board.", 404);
+    }
+
     res.json({ success: true });
   } catch (error) {
     next(error);
   }
 });
 
+
 // -------------------- PHOTOS --------------------
+
 
 app.post("/api/photos", upload.single("image"), async (req, res, next) => {
   if (!req.file) {
-    return res.status(400).json({ error: "An image file is required in the 'image' field." });
+    return res.status(400).json({
+      error: "An image file is required in the 'image' field."
+    });
   }
 
   let client;
+
   try {
     const tags = parseTags(req.body.tags);
-    const caption = typeof req.body.caption === "string" ? req.body.caption.trim() : "";
-    if (caption.length > 500) throw httpError("Caption must be 500 characters or fewer.");
+    const caption = typeof req.body.caption === "string"
+      ? req.body.caption.trim()
+      : "";
+
+    if (caption.length > 500) {
+      throw httpError("Caption must be 500 characters or fewer.");
+    }
+
+    // Read the selected board IDs from the upload form.
+    let boardIds = [];
+
+    if (req.body.boardIds) {
+      try {
+        boardIds = JSON.parse(req.body.boardIds);
+      } catch {
+        throw httpError("Invalid board selection.");
+      }
+
+      if (!Array.isArray(boardIds)) {
+        throw httpError("Board selection must be a list.");
+      }
+
+      boardIds = [...new Set(
+        boardIds.map(id => positiveId(id, "Board ID"))
+      )];
+    }
 
     client = await pool.connect();
     await client.query("BEGIN");
 
+    // Confirm that all selected boards exist.
+    if (boardIds.length > 0) {
+      const boardCheck = await client.query(
+        "SELECT id FROM boards WHERE id = ANY($1::bigint[])",
+        [boardIds]
+      );
+
+      if (boardCheck.rowCount !== boardIds.length) {
+        throw httpError("One or more selected boards do not exist.", 404);
+      }
+    }
+
+    // Save the photo.
     const photoResult = await client.query(
       `INSERT INTO photos (filename, caption)
        VALUES ($1, $2)
        RETURNING id, filename, caption, created_at`,
       [req.file.filename, caption]
     );
+
     const photo = photoResult.rows[0];
 
+    // Save tags.
     for (const name of tags) {
       const tagResult = await client.query(
-        `INSERT INTO tags (name) VALUES ($1)
+        `INSERT INTO tags (name)
+         VALUES ($1)
          ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
          RETURNING id`,
         [name]
@@ -282,29 +347,49 @@ app.post("/api/photos", upload.single("image"), async (req, res, next) => {
 
       await client.query(
         `INSERT INTO photo_tags (photo_id, tag_id)
-         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+         VALUES ($1, $2)
+         ON CONFLICT DO NOTHING`,
         [photo.id, tagResult.rows[0].id]
       );
     }
 
+    // Add the uploaded photo to every selected board.
+    for (const boardId of boardIds) {
+      await client.query(
+        `INSERT INTO board_photos (board_id, photo_id)
+         VALUES ($1, $2)
+         ON CONFLICT (board_id, photo_id) DO NOTHING`,
+        [boardId, photo.id]
+      );
+    }
+
     await client.query("COMMIT");
+
     res.status(201).json({
       ...photo,
       imageUrl: `/uploads/${encodeURIComponent(photo.filename)}`,
-      tags
+      tags,
+      boardIds
     });
+
   } catch (error) {
-    if (client) await client.query("ROLLBACK");
+    if (client) {
+      await client.query("ROLLBACK");
+    }
+
     try {
       await removeUpload(req.file.path);
     } catch (cleanupError) {
-      console.error("Could not remove uploaded file after a failed request:", cleanupError);
+      console.error("Could not remove uploaded file:", cleanupError);
     }
+
     next(error);
+
   } finally {
     client?.release();
   }
 });
+
 
 app.get("/api/photos", async (req, res, next) => {
   try {
